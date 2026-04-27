@@ -1,5 +1,6 @@
 const DEFAULT_FRONTEND_HTML_URL =
   "https://cdn.jsdelivr.net/gh/SomeRandomFella/Azahar-Web/index.html";
+const DEFAULT_FRONTEND_APP_FILE = "app.js";
 
 function resolveElement(target) {
   if (!target) {
@@ -8,7 +9,7 @@ function resolveElement(target) {
   if (typeof target === "string") {
     const element = document.querySelector(target);
     if (!element) {
-      throw new Error(`could not find mount target: ${target}`);
+      throw new Error(`Could not find mount target: ${target}`);
     }
     return element;
   }
@@ -26,7 +27,7 @@ function deriveFrontendBaseUrl(frontendHtmlUrl) {
 async function fetchText(url, fetchInit) {
   const response = await fetch(url, fetchInit);
   if (!response.ok) {
-    throw new Error(`no fetch ${url}: ${response.status} ${response.statusText}`);
+    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
   }
   return response.text();
 }
@@ -34,7 +35,7 @@ async function fetchText(url, fetchInit) {
 async function fetchBytes(url, fetchInit) {
   const response = await fetch(url, fetchInit);
   if (!response.ok) {
-    throw new Error(`no fetch ${url}: ${response.status} ${response.statusText}`);
+    throw new Error(`Failed to fetch ${url}: ${response.status} ${response.statusText}`);
   }
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -64,14 +65,35 @@ function injectHeadMarkup(html, markup) {
   return `${markup}\n${html}`;
 }
 
-function prepareFrontendHtml(html, frontendHtmlUrl) {
+function injectInlineFrontendScript(html, scriptContent) {
+  const inlineScript = `<script>\n${scriptContent}\n<\/script>`;
+  const scriptTagPattern = /<script[^>]*src=["'][^"']*app\.js["'][^>]*>\s*<\/script>/i;
+  if (scriptTagPattern.test(html)) {
+    return html.replace(scriptTagPattern, inlineScript);
+  }
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${inlineScript}\n</body>`);
+  }
+  return `${html}\n${inlineScript}`;
+}
+
+function patchFrontendScript(scriptContent) {
+  return scriptContent.replace(
+    /new URL\(([^,]+),\s*window\.location\.href\)/g,
+    "new URL($1, window.__AZAHAR_FRONTEND_BASE_URL__ || document.baseURI || window.location.href)",
+  );
+}
+
+async function prepareFrontendHtml(html, frontendHtmlUrl, fetchInit) {
   const frontendBaseUrl = ensureTrailingSlash(deriveFrontendBaseUrl(frontendHtmlUrl));
+  const frontendAppUrl = new URL(DEFAULT_FRONTEND_APP_FILE, frontendBaseUrl).href;
   let prepared = forceEmbedMode(html);
   const headMarkup =
     `<base href="${frontendBaseUrl}">\n` +
-    `<script>window.__AZAHAR_SRC_DOC__ = true;<\/script>`;
+    `<script>window.__AZAHAR_SRC_DOC__ = true; window.__AZAHAR_FRONTEND_BASE_URL__ = ${JSON.stringify(frontendBaseUrl)};<\/script>`;
   prepared = injectHeadMarkup(prepared, headMarkup);
-  return prepared;
+  const appScript = await fetchText(frontendAppUrl, fetchInit);
+  return injectInlineFrontendScript(prepared, patchFrontendScript(appScript));
 }
 
 class AzaharWebPlayer {
@@ -97,7 +119,13 @@ class AzaharWebPlayer {
       this.frontendHtmlPromise = fetchText(
         this.options.frontendHtmlUrl,
         this.options.frontendFetchInit,
-      ).then((html) => prepareFrontendHtml(html, this.options.frontendHtmlUrl));
+      ).then((html) =>
+        prepareFrontendHtml(
+          html,
+          this.options.frontendHtmlUrl,
+          this.options.frontendFetchInit,
+        ),
+      );
     }
     return this.frontendHtmlPromise;
   }
@@ -211,6 +239,13 @@ class AzaharWebPlayer {
     return this.call("bootRomData", name, bytes, options);
   }
 
+  async bootRomFromBuffer(buffer, options = {}) {
+    const bytes =
+      buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const name = options.name || "game.3ds";
+    return this.bootRomData(name, bytes, options);
+  }
+
   async bootRomFromUrl(url, options = {}) {
     const bytes = await fetchBytes(url, options.fetchInit);
     const name = options.name || guessFileName(url, "game.3ds");
@@ -220,6 +255,13 @@ class AzaharWebPlayer {
   async bootHomebrewFromUrl(url, options = {}) {
     const bytes = await fetchBytes(url, options.fetchInit);
     const name = options.name || guessFileName(url, "app.3dsx");
+    return this.bootRomData(name, bytes, options);
+  }
+
+  async bootHomebrewFromBuffer(buffer, options = {}) {
+    const bytes =
+      buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+    const name = options.name || "app.3dsx";
     return this.bootRomData(name, bytes, options);
   }
 
